@@ -193,6 +193,7 @@
     const station = stationEl.value;
     const pin = pinEl.value;
     const requestId = makeRequestId();
+    console.log("送出的櫃台代號：", station);
 
     setStatus("讀取到條碼：" + code + "\n正在送出並確認寫入……");
 
