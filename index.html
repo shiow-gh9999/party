@@ -94,6 +94,15 @@
   const startBtn = document.getElementById("startBtn");
   const stopBtn = document.getElementById("stopBtn");
   const stationEl = document.getElementById("station");
+  const DESTINATION_COLUMNS = {
+  A: "A",
+  B: "C",
+  C: "E",
+  D: "G",
+  E: "I",
+  F: "K",
+  G: "M"
+};
   const pinEl = document.getElementById("pin");
 
   let scanner = null;
@@ -225,7 +234,9 @@ const result = await Promise.race([
         setStatus(
           "⚠ 此條碼已經出現過\n" +
           "條碼：" + result.barcode + "\n" +
-          "寫入位置：" + result.station + result.row + "\n" +
+          "寫入位置：" +
+(DESTINATION_COLUMNS[result.station] || result.station) +
+result.row + "\n" +
           "後端耗時：" +
           (result.backendMs != null ? result.backendMs + " ms" : "未取得") + "\n" +
           "請確認是否重複報到。",
@@ -235,7 +246,9 @@ const result = await Promise.race([
         setStatus(
           "✓ 報到登記成功\n" +
           "條碼：" + result.barcode + "\n" +
-"寫入位置：" + result.station + result.row + "\n" +
+"寫入位置：" +
+(DESTINATION_COLUMNS[result.station] || result.station) +
+result.row + "\n" +
 "後端耗時：" +
 (result.backendMs != null ? result.backendMs + " ms" : "未取得"),
 "ok"
