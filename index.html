@@ -1,1 +1,371 @@
 
+
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+  <title>酒會報到條碼掃描</title>
+  <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      padding: 16px;
+      font-family: Arial, sans-serif;
+      background: #f4f6f8;
+      color: #222;
+    }
+    main {
+      max-width: 520px;
+      margin: 0 auto;
+      padding: 20px;
+      background: white;
+      border-radius: 16px;
+      box-shadow: 0 2px 12px #00000012;
+    }
+    h1 { font-size: 24px; margin-top: 0; }
+    label { display: block; margin: 16px 0 8px; font-weight: bold; }
+    select, input, button {
+      width: 100%;
+      min-height: 48px;
+      font-size: 17px;
+      border-radius: 9px;
+      margin: 6px 0;
+    }
+    select, input { padding: 10px; border: 1px solid #bbb; background: white; }
+    button {
+      border: 0;
+      padding: 12px;
+      margin-top: 10px;
+      background: #1769aa;
+      color: white;
+      font-weight: bold;
+    }
+    button.secondary { background: #555; }
+    button:disabled { opacity: .5; }
+    #reader { margin-top: 16px; width: 100%; }
+    #status {
+      margin-top: 16px;
+      padding: 12px;
+      border-radius: 8px;
+      background: #eef2f5;
+      white-space: pre-line;
+      overflow-wrap: anywhere;
+    }
+    .ok { background: #d9ead3 !important; }
+    .warn { background: #f4cccc !important; }
+    .hint { color: #555; font-size: 14px; line-height: 1.6; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>活動報到條碼掃描</h1>
+  <p class="hint">請選擇自己的櫃台。掃描後請等候系統確認寫入結果。</p>
+
+  <label for="station">選擇報到櫃台</label>
+  <select id="station">
+    <option value="A">A 櫃台</option>
+    <option value="B">B 櫃台</option>
+    <option value="C">C 櫃台</option>
+    <option value="D">D 櫃台</option>
+    <option value="E">E 櫃台</option>
+    <option value="F">F 櫃台</option>
+    <option value="G">G 櫃台</option>
+  </select>
+
+  <label for="pin">工作人員掃描密碼</label>
+  <input id="pin" type="password" placeholder="請輸入掃描密碼" autocomplete="current-password">
+
+  <button id="startBtn" type="button">開始掃描</button>
+  <button id="stopBtn" type="button" class="secondary" disabled>停止掃描</button>
+
+  <div id="status" role="status" aria-live="polite">尚未開始掃描。</div>
+  <div id="reader"></div>
+  
+</main>
+
+<script>
+(() => {
+  const GAS_URL = "https://script.google.com/macros/s/AKfycbynNW9uKIWQR3g44Wnll0Xku-GCNuWnyFcElk_XkNkEYqxLpu8FgrrchGAk2_kAv579XQ/exec";
+
+  const statusEl = document.getElementById("status");
+  const startBtn = document.getElementById("startBtn");
+  const stopBtn = document.getElementById("stopBtn");
+  const stationEl = document.getElementById("station");
+  const pinEl = document.getElementById("pin");
+
+  let scanner = null;
+  let running = false;
+  let processing = false;
+  let lastCode = "";
+  let lastSeenAt = 0;
+
+  function setStatus(message, type = "") {
+    statusEl.textContent = message;
+    statusEl.className = type;
+  }
+
+  function makeRequestId() {
+    return "r" + Date.now() + "_" +
+      Math.random().toString(36).slice(2, 10);
+  }
+
+  // 用 JSONP 查詢 Apps Script 暫存的處理結果
+  function queryResult(requestId) {
+    return new Promise((resolve, reject) => {
+      const callbackName =
+        "checkinCallback_" + requestId.replace(/[^a-zA-Z0-9_$]/g, "");
+
+      const script = document.createElement("script");
+      let finished = false;
+
+      const cleanup = () => {
+        if (finished) return;
+        finished = true;
+        clearTimeout(timeout);
+        delete window[callbackName];
+        script.remove();
+      };
+
+      const timeout = setTimeout(() => {
+        cleanup();
+        reject(new Error("等待寫入結果逾時"));
+      }, 2500);
+
+      window[callbackName] = result => {
+        cleanup();
+        resolve(result);
+      };
+
+      script.onerror = () => {
+        cleanup();
+        reject(new Error("無法查詢寫入結果"));
+      };
+
+      const url = new URL(GAS_URL);
+      url.searchParams.set("action", "status");
+      url.searchParams.set("requestId", requestId);
+      url.searchParams.set("callback", callbackName);
+      url.searchParams.set("_", Date.now());
+
+      script.src = url.toString();
+      document.body.appendChild(script);
+    });
+  }
+
+  async function waitForResult(requestId) {
+    const deadline = Date.now() + 20000;
+
+    while (Date.now() < deadline) {
+      try {
+        const result = await queryResult(requestId);
+
+        if (result && result.pending !== true) {
+          return result;
+        }
+      } catch (error) {
+        // 網路或重新導向暫時失敗時，稍後再查詢
+      }
+
+      await new Promise(resolve => setTimeout(resolve, 400));
+    }
+
+    throw new Error(
+      "等待伺服器確認逾時。\n請先檢查試算表是否已新增條碼，再決定是否重掃，避免重複登記。"
+    );
+  }
+
+  async function submitBarcode(code) {
+    if (processing) return;
+    processing = true;
+
+    const station = stationEl.value;
+    const pin = pinEl.value;
+    const requestId = makeRequestId();
+
+    setStatus("讀取到條碼：" + code + "\n正在送出並確認寫入……");
+
+    try {
+      // 先送出條碼，不等待 fetch 完成
+const postRequest = fetch(GAS_URL, {
+  method: "POST",
+  mode: "no-cors",
+  redirect: "follow",
+  headers: {
+    "Content-Type": "text/plain;charset=UTF-8"
+  },
+  body: JSON.stringify({
+    requestId: requestId,
+    barcode: code,
+    station: station,
+    pin: pin
+  })
+});
+
+// fetch 失敗時保留錯誤處理；成功時不阻擋結果查詢
+const postFailure = postRequest.then(
+  () => new Promise(() => {}),
+  error => Promise.reject(error)
+);
+
+// 立即開始查詢，仍須取得伺服器確認
+const result = await Promise.race([
+  waitForResult(requestId),
+  postFailure
+]);
+
+      if (!result.success) {
+        setStatus(
+          "寫入失敗：" + (result.message || "請確認設定"),
+          "warn"
+        );
+      } else if (result.duplicate) {
+        setStatus(
+          "⚠ 此條碼已經出現過\n" +
+          "條碼：" + result.barcode + "\n" +
+          "寫入位置：" + result.station + result.row + "\n" +
+          "後端耗時：" +
+          (result.backendMs != null ? result.backendMs + " ms" : "未取得") + "\n" +
+          "請確認是否重複報到。",
+          "warn"
+        );
+      } else {
+        setStatus(
+          "✓ 報到登記成功\n" +
+          "條碼：" + result.barcode + "\n" +
+"寫入位置：" + result.station + result.row + "\n" +
+"後端耗時：" +
+(result.backendMs != null ? result.backendMs + " ms" : "未取得"),
+"ok"
+        );
+      }
+
+      if (navigator.vibrate) navigator.vibrate(100);
+
+    } catch (error) {
+      setStatus(
+        "目前無法確認寫入結果。\n" +
+        (error.message || "請檢查網路連線") +
+        "\n請先查看試算表，再決定是否重掃。",
+        "warn"
+      );
+    } finally {
+      processing = false;
+    }
+  }
+
+  async function startScanner() {
+    if (running) return;
+
+    if (!pinEl.value.trim()) {
+      setStatus("請先輸入工作人員掃描密碼。", "warn");
+      return;
+    }
+
+    if (!window.isSecureContext ||
+        !navigator.mediaDevices ||
+        !navigator.mediaDevices.getUserMedia) {
+      setStatus("無法使用相機，請使用 GitHub Pages 的 HTTPS 網址。", "warn");
+      return;
+    }
+
+    if (typeof Html5Qrcode === "undefined") {
+      setStatus("掃描程式載入失敗，請確認網路後重新整理。", "warn");
+      return;
+    }
+
+    startBtn.disabled = true;
+    setStatus("正在啟動相機……");
+
+    try {
+      const formats = [
+        Html5QrcodeSupportedFormats.QR_CODE,
+        Html5QrcodeSupportedFormats.CODE_128,
+        Html5QrcodeSupportedFormats.CODE_39,
+        Html5QrcodeSupportedFormats.EAN_13,
+        Html5QrcodeSupportedFormats.EAN_8,
+        Html5QrcodeSupportedFormats.UPC_A,
+        Html5QrcodeSupportedFormats.UPC_E,
+        Html5QrcodeSupportedFormats.ITF,
+        Html5QrcodeSupportedFormats.CODABAR
+      ];
+
+      scanner = new Html5Qrcode("reader", {
+        formatsToSupport: formats,
+        verbose: false
+      });
+
+      await scanner.start(
+        { facingMode: "environment" },
+      {
+  fps: 10,
+  qrbox: (width, height) => ({
+    width: Math.min(Math.floor(width * 0.85), 420),
+    height: Math.min(Math.floor(height * 1), 600)
+  })
+},
+        decodedText => {
+          const code = String(decodedText || "").trim();
+          if (!code || processing) return;
+
+          const now = Date.now();
+
+          if (code === lastCode && now - lastSeenAt < 2500) {
+            lastSeenAt = now;
+            return;
+          }
+
+          lastCode = code;
+          lastSeenAt = now;
+          submitBarcode(code);
+        },
+        () => {}
+      );
+
+      running = true;
+      startBtn.disabled = true;
+      stopBtn.disabled = false;
+      stationEl.disabled = true;
+      setStatus("相機已啟動，請對準條碼。");
+
+    } catch (error) {
+      console.error(error);
+      startBtn.disabled = false;
+      stopBtn.disabled = true;
+      setStatus(
+        "無法啟動相機：" +
+        (error && error.message ? error.message : String(error)),
+        "warn"
+      );
+    }
+  }
+
+  async function stopScanner() {
+    if (!scanner || !running) return;
+
+    try {
+      await scanner.stop();
+    } catch (error) {
+      console.error(error);
+    }
+
+    running = false;
+    startBtn.disabled = false;
+    stopBtn.disabled = true;
+    stationEl.disabled = false;
+    setStatus("已停止掃描。");
+  }
+
+  setInterval(() => {
+    if (Date.now() - lastSeenAt > 2500) {
+      lastCode = "";
+    }
+  }, 500);
+
+  startBtn.addEventListener("click", startScanner);
+  stopBtn.addEventListener("click", stopScanner);
+})();
+</script>
+</body>
+</html>
